@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"c:/AddsMint/school-fee-software\" log --oneline -20)",
+      "Bash(Get-ChildItem -Path \"c:\\\\AddsMint\\\\school-fee-software\\\\client\\\\src\\\\screens\\\\reports\" -Recurse)",
+      "Bash(Select-Object FullName)",
+      "Bash(grep -r '$executeRaw\\\\|$queryRaw\\\\|prisma\\\\.$' 'c:\\\\AddsMint\\\\school-fee-software\\\\server\\\\src' '--include=*.js')",
+      "Bash(npx prisma *)"
+    ]
+  }
+}

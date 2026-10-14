@@ -1,0 +1,640 @@
+generator client {
+  provider = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+//////////
+// AUTH //
+//////////
+
+enum UserRole {
+  ADMIN
+  TEACHER
+  STUDENT
+}
+
+model User {
+  id             String    @id @default(uuid())
+  email          String    @unique
+  password       String
+  name           String
+  role           UserRole  @default(STUDENT)
+  avatarUrl      String?
+  lastLoginAt    DateTime?
+  allowedModules String[]  @default([])
+  customRoleId   String?
+  customRole     Role?     @relation(fields: [customRoleId], references: [id], onDelete: SetNull)
+  sessions       Session[]
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([customRoleId])
+}
+
+//////////////////////////
+// RBAC                 //
+//////////////////////////
+//
+// Permissions are seeded from a static catalog (`notifications.defaults.js`-
+// style — see roles.defaults.js). Roles can be either system roles (Admin,
+// Teacher) which the admin can edit but never delete, or custom roles
+// created via the Settings → Roles screen.
+
+model Permission {
+  id       String @id @default(uuid())
+  key      String @unique
+  label    String
+  category String
+
+  roles    Role[] @relation("RolePermissions")
+}
+
+model Role {
+  id          String       @id @default(uuid())
+  name        String       @unique
+  description String?
+  isSystem    Boolean      @default(false)
+  permissions Permission[] @relation("RolePermissions")
+  users       User[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([isSystem])
+}
+
+//////////////////////////
+// ACTIVITY LOG         //
+//////////////////////////
+
+enum ActivityAction {
+  LOGIN
+  LOGOUT
+  STUDENT_CREATED
+  STUDENT_UPDATED
+  STUDENT_DELETED
+  VOUCHER_CREATED
+  VOUCHER_UPDATED
+  VOUCHER_DELETED
+  PAYMENT_COLLECTED
+  SETTINGS_UPDATED
+  USER_CREATED
+  USER_UPDATED
+  USER_DELETED
+  ROLE_CREATED
+  ROLE_UPDATED
+  ROLE_DELETED
+}
+
+model ActivityLog {
+  id          String          @id @default(uuid())
+  actorId     String?
+  actorName   String          @default("System")
+  actorEmail  String?
+  action      ActivityAction
+  entityType  String?
+  entityId    String?
+  entityLabel String?
+  details     Json?
+  ipAddress   String?
+  createdAt   DateTime        @default(now())
+
+  @@index([createdAt])
+  @@index([actorId])
+  @@index([action])
+  @@index([entityType, entityId])
+}
+
+// One row per active sign-in. JWTs carry the session id; the `protect`
+// middleware rejects tokens whose session has been revoked or has expired.
+// This is what powers "Active sessions" + "Sign out other devices" in
+// Settings → Sessions.
+model Session {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userAgent  String?
+  ipAddress  String?
+  lastUsedAt DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+  @@index([revokedAt])
+  @@index([expiresAt])
+}
+
+//////////////////////
+// APP SETTINGS     //
+//////////////////////
+//
+// Singleton row keyed by id="default" — there is one global settings record
+// for the school, fetched + updated by the admin Settings screen.
+
+enum VoucherResetCadence {
+  YEARLY
+  MONTHLY
+  NEVER
+}
+
+model AppSettings {
+  id                       String   @id @default("default")
+
+  // School profile
+  schoolName               String   @default("My School")
+  schoolPhone              String?
+  schoolEmail              String?
+  schoolAddress            String?
+  schoolLogoUrl            String?
+  voucherHeader            String?
+  voucherFooter            String?
+
+  // Voucher numbering
+  voucherPrefix            String   @default("V")
+  voucherPadding           Int      @default(4)
+  voucherResetCadence      VoucherResetCadence @default(YEARLY)
+
+  // Student numbering (display formatting + sequence resets handled separately)
+  regNumberPrefix          String?
+  regNumberPadding         Int      @default(0)
+  rollNumberPrefix         String?
+  rollNumberPadding        Int      @default(0)
+
+  // Late-fee rules (used as fallback when FeeStructure.late is 0/missing)
+  graceDays                Int      @default(0)
+  defaultLateFinePerDay    Float    @default(0)
+
+  // Salary / staff absence — divisor used to compute per-day rate from monthlySalary
+  absenceWorkingDaysDivisor Int     @default(30)
+
+  // UI preferences
+  dateFormat               String   @default("DD/MM/YYYY")
+
+  // Notifications — channel toggles + sender identities. The actual API
+  // keys (Resend, Twilio) live in env, never the database.
+  notificationsEmailEnabled    Boolean @default(false)
+  notificationsSmsEnabled      Boolean @default(false)
+  notificationsWhatsappEnabled Boolean @default(false)
+  notificationsEmailFrom       String?
+  notificationsSmsFrom         String?
+  notificationsWhatsappFrom    String?
+
+  updatedAt                DateTime @updatedAt
+}
+
+//////////////////////////
+// NOTIFICATIONS        //
+//////////////////////////
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+  WHATSAPP
+}
+
+enum NotificationEvent {
+  VOUCHER_CREATED
+  PAYMENT_RECEIVED
+  DUES_REMINDER
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  FAILED
+  SKIPPED
+}
+
+// Editable subject + body for each (event, channel) combination. Body
+// supports {{placeholders}} resolved at dispatch time. We only allow one
+// row per pair so the editor stays simple (no template versioning yet).
+model NotificationTemplate {
+  id        String              @id @default(uuid())
+  event     NotificationEvent
+  channel   NotificationChannel
+  subject   String?
+  body      String
+  enabled   Boolean             @default(true)
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+
+  @@unique([event, channel])
+}
+
+// One row per outbound attempt — used by the Settings → Notifications page
+// to show recent send history. Status + errorMessage tell the admin
+// whether their template wiring is healthy.
+model NotificationLog {
+  id           String              @id @default(uuid())
+  event        NotificationEvent
+  channel      NotificationChannel
+  recipient    String
+  subject      String?
+  body         String
+  status       NotificationStatus  @default(QUEUED)
+  errorMessage String?
+  studentId    String?
+  voucherId    String?
+  createdAt    DateTime            @default(now())
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([studentId])
+  @@index([voucherId])
+}
+
+enum StudentStatus {
+  ACTIVE
+  INACTIVE
+  GRADUATED
+  WITHDRAWN
+  DISCHARGED
+  RUSTICATED
+  ARCHIVED
+}
+
+/////////////
+// STUDENT //
+/////////////
+
+model Student {
+  id             String   @id @default(uuid())
+  regNumber      Int      @unique @default(autoincrement())
+  rollNumber     Int      @default(autoincrement())
+  firstName      String
+  lastName       String?
+  dob            DateTime?
+  admissionDate  DateTime?
+  status         StudentStatus @default(ACTIVE)
+
+  // Academic
+  class              String
+  lastSession        String // Changed from String? to String
+
+  // Parent/Guardian Info
+  fathersName        String
+  fathersCnic        String // Changed from String? to String
+  guardianName       String?
+  guardianOccupation String?
+
+  // Contact
+  phone           String
+  emergencyNumber String // Changed from String? to String
+  email           String?
+  address         String
+
+  // Academic History
+  previousSchool  String?
+
+  // Media
+  photo            String? // Path to student's photo
+  birthCertificate String? // Path to birth certificate document
+  fatherCnicFile   String? // Path to father's CNIC document 
+  leavingCertificate String? // Path to leaving certificate document
+
+  // Custom Category Discounts
+  tuitionDiscount    Float    @default(0)
+  examDiscount       Float    @default(0)
+  transportDiscount  Float    @default(0)
+
+  discounts      Discount[] @relation("StudentDiscounts")
+  vouchers       Voucher[]
+  invoices       Invoice[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt // Added
+
+  @@index([class])
+  @@index([fathersCnic])
+  @@index([phone])
+}
+
+/////////////
+// WORKERS //
+/////////////
+
+enum WorkerStatus {
+  Active
+  Inactive
+}
+
+model Worker {
+  id                   String              @id @default(uuid())
+  name                 String
+  phone                String?             @default("")
+  role                 String?             @default("")
+  profilePicture       String?             @default("")
+  monthlySalary          Float               @default(0)
+  hourlyOvertimeRate   Float               @default(0)
+  standardWorkingDays  Int                 @default(26)
+  status               WorkerStatus        @default(Active)
+  advances             WorkerAdvance[]
+  payments             WorkerPayment[]
+  extraHours           WorkerExtraHours[]
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  @@index([status])
+}
+
+model WorkerAdvance {
+  id                String   @id @default(uuid())
+  workerId          String
+  worker            Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  amount            Float
+  date              DateTime @default(now())
+  month             String   // Format: "YYYY-MM"
+  notes             String?  @default("")
+  cashbookEntryId   String?  // Linked to Cashbook
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([month])
+}
+
+model WorkerExtraHours {
+  id            String         @id @default(uuid())
+  workerId      String
+  worker        Worker         @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  month         String         // Format: "YYYY-MM"
+  hours         Float
+  ratePerHour   Float
+  amount        Float          // hours * rate
+  paymentId     String?
+  payment       WorkerPayment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([month])
+}
+
+model WorkerPayment {
+  id                String             @id @default(uuid())
+  workerId          String
+  worker            Worker             @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  month             String             // Format: "YYYY-MM"
+  totalSalary         Float              @default(0)
+  advanceTotal      Float              @default(0)
+  overtimeHours     Float              @default(0)
+  overtimeAmount    Float              @default(0)
+  absentDays        Float              @default(0)
+  absenceDeduction  Float              @default(0)
+  netPaid           Float              @default(0)
+  paidDate          DateTime           @default(now())
+  cashbookEntryId   String?            // Linked to Cashbook
+  notes             String?            @default("")
+  extraHours        WorkerExtraHours[]
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([month])
+}
+
+enum CashbookEntryType {
+  in
+  out
+}
+
+model Cashbook {
+  id          String            @id @default(uuid())
+  type        CashbookEntryType // formerly String — now constrained at the DB layer
+  description String
+  amount      Float
+  date        DateTime          @default(now())
+  method      String            // PaymentMethod.name (user-defined, e.g. "Cash", "EasyPaisa", "MEZAN 8383")
+  createdAt   DateTime          @default(now())
+
+  @@index([method])
+  @@index([method, createdAt])
+}
+
+/////////////////////
+// PAYMENT METHODS //
+/////////////////////
+
+model PaymentMethod {
+  id              String   @id @default(uuid())
+  name            String   @unique
+  openingBalance  Float    @default(0)
+  archived        Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  outgoingTransfers PaymentTransfer[] @relation("FromMethod")
+  incomingTransfers PaymentTransfer[] @relation("ToMethod")
+
+  @@index([archived])
+}
+
+model PaymentTransfer {
+  id           String        @id @default(uuid())
+  fromMethodId String
+  fromMethod   PaymentMethod @relation("FromMethod", fields: [fromMethodId], references: [id], onDelete: Restrict)
+  toMethodId   String
+  toMethod     PaymentMethod @relation("ToMethod", fields: [toMethodId], references: [id], onDelete: Restrict)
+  amount       Float
+  date         DateTime      @default(now())
+  note         String        @default("")
+  createdAt    DateTime      @default(now())
+
+  @@index([date])
+  @@index([fromMethodId])
+  @@index([toMethodId])
+}
+
+//////////////
+// EXPENSES //
+//////////////
+
+model ExpenseHead {
+  id          String    @id @default(uuid())
+  name        String    @unique
+  description String?   @default("")
+  archived    Boolean   @default(false)
+  expenses    Expense[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([archived])
+}
+
+model Expense {
+  id              String      @id @default(uuid())
+  headId          String
+  head            ExpenseHead @relation(fields: [headId], references: [id], onDelete: Restrict)
+  date            DateTime    @default(now())
+  amount          Float
+  detail          String?     @default("")
+  paymentMethod   String      // PaymentMethod.name
+  cashbookEntryId String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([date])
+  @@index([headId])
+  @@index([paymentMethod])
+}
+
+/////////////
+// FEEHEAD //
+/////////////
+
+model FeeHead {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  amount      Float
+  isRecurring Boolean  @default(true)
+  
+  structures  FeeStructureItem[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+///////////////////
+// FEESTRUCTURE //
+/////////////////
+
+model FeeStructure {
+  id           String   @id @default(uuid())
+  name         String?
+  className    String   @unique
+  late         Float    @default(100)
+  tuition      Float    @default(0)
+  exam         Float    @default(0)
+  transport    Float    @default(0)
+  schoolFee    Float    @default(0)
+  admissionFee Float    @default(0)
+  annualFund   Float    @default(0)
+  courseFee    Float    @default(0)
+  fees         FeeStructureItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model FeeStructureItem {
+  id             String       @id @default(uuid())
+  feeStructureId String
+  feeStructure   FeeStructure @relation(fields: [feeStructureId], references: [id], onDelete: Cascade)
+  feeHeadId      String
+  feeHead        FeeHead      @relation(fields: [feeHeadId], references: [id], onDelete: Cascade)
+  amount         Float        @default(0)
+
+  @@unique([feeStructureId, feeHeadId])
+}
+
+///////////////////
+// PRODUCTS //
+/////////////////
+
+model Product { // Updated Product model
+  id            String   @id @default(uuid())
+  productNumber Int      @unique @default(autoincrement())
+  productName   String
+  category      String? // Changed from String to String?
+  sku           Int?     @unique // Changed from Float @default(0) to Int? @unique
+  unitPrice     Float // Removed @default(0)
+  stockQuantity Int      @default(0) // Changed from Float @default(0) to Int @default(0)
+  description   String? // Changed from String to String?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([productName])
+  @@index([category])
+}
+
+/////////////
+// VOUCHER //
+/////////////
+
+enum VoucherStatus {
+  UNPAID
+  PAID
+  PARTIAL
+}
+
+model Voucher {
+  id            String        @id @default(uuid())
+  serialId      Int           @unique @default(autoincrement())
+  voucherNumber String        @unique
+  studentId     String
+  student       Student       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  month         String
+  dueDate       DateTime
+  amount        Float
+  arrears       Float         @default(0)
+  fine          Float         @default(0)
+  discount      Float         @default(0)
+
+  // Discount Breakdown for Audit Trail
+  tuitionDiscount    Float    @default(0)
+  examDiscount       Float    @default(0)
+  transportDiscount  Float    @default(0)
+
+  totalPayable  Float
+  paidAmount    Float         @default(0)
+  status        VoucherStatus @default(UNPAID)
+  paymentMethod String?
+  transactionId String?
+
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@unique([studentId, month])
+  @@index([month])
+  @@index([dueDate])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Invoice {
+  id              String        @id @default(uuid())
+  serialId        Int           @unique @default(autoincrement())
+  invoiceNumber   String        @unique
+  studentId       String
+  student         Student       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  invoiceDate     DateTime      @default(now())
+  subtotal        Float
+  discount        Float         @default(0)
+  grandTotal      Float
+  notes           String?
+  paymentMethod   String?       // PaymentMethod.name (user-defined)
+  cashbookEntryId String?       // Linked Cashbook row for this sale's deposit
+  items           InvoiceItem[]
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([invoiceDate])
+  @@index([createdAt])
+}
+
+model InvoiceItem {
+  id        String  @id @default(uuid())
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  productId String
+  quantity  Float
+  unitPrice Float
+  total     Float
+}
+
+/////////////
+// DISCOUNT //
+/////////////
+
+model Discount {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  amount      Float
+  isRecurring Boolean  @default(true)
+  
+  students    Student[] @relation("StudentDiscounts")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

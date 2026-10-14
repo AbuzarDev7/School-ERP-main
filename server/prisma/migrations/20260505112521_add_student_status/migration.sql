@@ -1,0 +1,5 @@
+-- CreateEnum
+CREATE TYPE "StudentStatus" AS ENUM ('ACTIVE', 'INACTIVE', 'GRADUATED', 'WITHDRAWN', 'DISCHARGED', 'RUSTICATED', 'ARCHIVED');
+
+-- AlterTable
+ALTER TABLE "Student" ADD COLUMN     "status" "StudentStatus" NOT NULL DEFAULT 'ACTIVE';
